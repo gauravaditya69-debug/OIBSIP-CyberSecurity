@@ -1,0 +1,297 @@
+================================================================================
+                    CYBERSECURITY RESEARCH REPORT (EXTENDED)
+                    Task 4: IN-DEPTH TECHNICAL ANALYSIS OF COMMON 
+                          NETWORK SECURITY THREATS
+================================================================================
+Prepared by: Security Analyst Intern
+Date: June 18, 2026
+Target Audience: Network Engineers, SecOps Team, and System Administrators
+Subject: Analysis of DoS/DDoS, Man-in-the-Middle (MITM), and Spoofing
+================================================================================
+
+1. INTRODUCTION & THE OSI MODEL REFERENCE
+--------------------------------------------------------------------------------
+Any network security model starts with the OSI framework. It defines how data moves
+across networks, but it also defines our attack surfaces. Cyber threats target the
+weak spots in specific layers.
+
+This report walks through the technical mechanics of three common threat categories:
+1. Denial of Service (DoS) and Distributed Denial of Service (DDoS)
+2. Man-in-the-Middle (MITM) Attacks
+3. Spoofing Vectors (IP, ARP, DNS, Email)
+
+By mapping these attacks to the OSI model, analyzing packet-level behavior, and
+detailing practical configuration defenses, this document serves as an engineering
+reference for securing our systems.
+
+
+2. DENIAL OF SERVICE (DoS) & DISTRIBUTED DENIAL OF SERVICE (DDoS)
+--------------------------------------------------------------------------------
+Denial of Service (DoS) and Distributed Denial of Service (DDoS) attacks are designed
+to break availability. Their goal is straightforward: flood resources until the
+services crash, locking out legitimate users.
+
+2.1
+  OSI Layer Breakdown:
+  * Layer 3 (Network) & Layer 4 (Transport): Volumetric and Protocol attacks (SYN Floods,
+    UDP Floods, ICMP Floods, Reflection/Amplification).
+  * Layer 7 (Application): Exploiting application resources (HTTP Floods, Slowloris).
+
+2.2 How the Protocols are Exploited:
+
+  2.2.1 TCP SYN Floods (Layer 4 - Transport)
+    Normally, a client and server establish a TCP connection using the three-way handshake:
+      Client                              Server
+        | -------- SYN (Seq=X) ---------> | (Server allocates TCB block in memory)
+        | <----- SYN-ACK (Seq=Y,Ack=X+1) - | (State: SYN-RECEIVED)
+        | -------- ACK (Ack=Y+1) --------> | (State: ESTABLISHED)
+
+    During a SYN flood, the attacker exploits this handshake:
+      1. They spoof the source IP address of the SYN packets or coordinate a botnet.
+      2. They send thousands of SYN packets to the target server.
+      3. They never respond with the final ACK packet.
+    
+    Because the final ACK never arrives, the server keeps these Transmission Control Block
+    (TCB) entries open in memory. It doesn't take long for the connection backlog (the
+    SYN-RECEIVED state queue) to saturate. Once full, the server runs out of memory resources
+    and begins dropping new, legitimate connection requests.
+
+    * You can spot this pattern on a Linux system by checking for a high volume of half-open connections:
+      $ netstat -an | grep SYN_RECV
+
+  2.2.2 UDP Reflection & Amplification (Layers 3 & 4)
+    Since UDP is stateless and doesn't require a handshake, spoofing the source IP address
+    is trivial. Attackers abuse this in two ways:
+    * Reflection: The attacker sends queries to open internet servers (like DNS resolvers
+      or NTP servers) but spoofs the sender address as the victim's IP. The replies are
+      redirected to the victim.
+    * Amplification: The attacker queries records that trigger responses much larger
+      than the original request, acting as a traffic multiplier.
+      - NTP Amplification: This exploits the older `monlist` command on NTP servers,
+        which returns the IPs of the last 600 systems that queried it. A tiny 64-byte
+        query can trigger a 48-KB response, multiplying the traffic by roughly 700 times.
+      - DNS Amplification: This uses large TXT records, the `ANY` query, or EDNS0
+        extensions to inflate traffic volumes by 50 to 100 times.
+
+  2.2.3 Slowloris (Layer 7 - Application)
+    Slowloris takes a different approach: it's a 'low and slow' attack that targets application
+    resources rather than network bandwidth. It opens multiple HTTP connections to a web server
+    (Apache is particularly vulnerable) and deliberately keeps them open by sending partial HTTP
+    headers at slow intervals (e.g., every 10-15 seconds):
+      GET / HTTP/1.1\r\n
+      Host: target.com\r\n
+      User-Agent: Mozilla/5.0\r\n
+      [Delay...]
+      X-a: b\r\n
+      [Delay...]
+      X-c: d\r\n
+    
+    Since the header block is never finished with a double carriage return (\r\n\r\n), the
+    server is forced to hold the connection thread open. It's only a matter of time before
+    the server's thread pool or file descriptors are completely exhausted, locking out genuine
+    users while consuming almost no bandwidth.
+
+2.3 What this means for the business:
+  * Database exhaustion: Connection queues fill up, stalling transactions and occasionally
+    corrupting data.
+  * SLA penalties: Downtime quickly leads to contract violations and customer churn.
+  * Scrubbing costs: Turning on emergency cloud scrubbers to absorb volumetric floods
+    is incredibly expensive.
+
+2.4 Hardening & Defensive Controls:
+
+  * Host Hardening: Enabling SYN Cookies on Linux
+    Normally, a server allocates memory as soon as a SYN packet arrives. With SYN cookies enabled,
+    the server doesn't allocate TCB memory immediately. Instead, it encodes connection details
+    cryptographically inside the Sequence Number of the SYN-ACK. The resources are only allocated
+    when a valid ACK returns from the client.
+    Add these lines to `/etc/sysctl.conf`:
+      net.ipv4.tcp_syncookies = 1
+      net.ipv4.tcp_max_syn_backlog = 2048
+      net.ipv4.tcp_synack_retries = 2
+    Load the new settings immediately:
+      # sysctl -p
+
+  * Network Defenses: Anycast & WAFs
+    Routing traffic through a global Anycast network lets edge nodes absorb volumetric Layer 3/4
+    floods before they can reach our actual servers.
+
+2.5 Real-World Impact: The Mirai Botnet (2016)
+  Mirai targeted poorly secured Internet of Things (IoT) devices, scanning telnet ports
+  (TCP 23/2323) using a hardcoded list of just 61 default credentials (like `root/12345`).
+  Once a device was compromised, it downloaded the Mirai payload, joining a botnet capable of
+  launching massive HTTP, GRE, and DNS floods. The resulting attack on Dyn DNS peaked above
+  1.2 Tbps, proving that simple, unpatched IoT devices could be leveraged to overwhelm critical
+  internet infrastructure.
+
+
+3. MAN-IN-THE-MIDDLE (MITM) ATTACKS
+--------------------------------------------------------------------------------
+Man-in-the-Middle (MITM) attacks break both confidentiality and integrity by letting an
+attacker sit between two communicating systems to read or alter their traffic.
+
+3.1 OSI Layer Breakdown:
+  * Layer 2 (Data Link): ARP Poisoning/Spoofing.
+  * Layer 3 (Network): Route hijacking via BGP or ICMP redirects.
+  * Layer 7 (Application): SSL Stripping, Proxying, Session Hijacking.
+
+3.2 How MITM Attacks Work:
+
+  3.2.1 ARP Poisoning (Layer 2)
+    ARP is designed to map IP addresses to physical MAC addresses on a local network. Because
+    ARP is stateless and has no built-in authentication, systems will accept ARP replies even
+    if they never asked for them.
+    * For example, consider this setup:
+      Gateway (IP: 192.168.1.1, MAC: AA:AA:AA:AA:AA:AA)
+      Victim  (IP: 192.168.1.5, MAC: VV:VV:VV:VV:VV:VV)
+      Attacker (IP: 192.168.1.9, MAC: XX:XX:XX:XX:XX:XX)
+    
+    The attacker floods the network with malicious ARP updates:
+      - To the Victim: "192.168.1.1 is at XX:XX:XX:XX:XX:XX"
+      - To the Gateway: "192.168.1.5 is at XX:XX:XX:XX:XX:XX"
+    
+    Both systems update their ARP cache with the new entry. As a result, all traffic between
+    the victim and the gateway now routes directly through the attacker's network interface (NIC),
+    which is running in promiscuous mode to capture and relay the packets.
+
+  3.2.2 SSL Stripping (Layer 7)
+    SSL stripping intercepts secure connections and downgrades them to unencrypted HTTP.
+    1. A user tries to access a secure site (or is redirected there).
+    2. The attacker intercepts the request and establishes a secure HTTPS session with the
+       target server.
+    3. The attacker rewrites the server's HTML response, replacing all `https://` links with
+       `http://` before forwarding it to the victim.
+    4. The victim's browser continues talking to the attacker in plain text HTTP, while the
+       attacker proxies the traffic securely to the destination. The attacker gets complete
+       visibility of credentials, cookies, and session tokens in cleartext.
+
+3.3 Hardening & Defensive Controls:
+
+  * Switch Security: Dynamic ARP Inspection (DAI)
+    DAI validates ARP traffic on untrusted ports against the DHCP snooping binding table to
+    ensure IP-to-MAC mappings are legitimate. Here is a configuration snippet for a Cisco switch:
+      Switch# configure terminal
+      Switch(config)# ip dhcp snooping
+      Switch(config)# ip dhcp snooping vlan 10
+      Switch(config)# ip arp inspection vlan 10
+      ! Trust the port connected to the legitimate gateway/router:
+      Switch(config)# interface gigabitethernet 0/1
+      Switch(config-if)# ip dhcp snooping trust
+      Switch(config-if)# ip arp inspection trust
+
+  * Web Security: HTTP Strict Transport Security (HSTS)
+    An HSTS header tells the browser to only communicate using HTTPS. If a user tries to use
+    HTTP, the browser automatically redirects them, making SSL stripping impossible.
+    * To enable this in Apache, add the following to your site configuration:
+      Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+
+3.4 Real-World Impact: The Equifax App Vulnerability (2017)
+  During a routine audit, researchers found that the Equifax mobile app did not validate SSL/TLS
+  certificates. Normally, a client verifies that a server's certificate is signed by a trusted
+  CA and matches the host domain. Because the Equifax app skipped this step, an attacker on the
+  same local network could present a self-signed certificate and proxy all traffic, harvesting
+  social security numbers, dates of birth, and financial histories without triggering any warnings.
+
+
+4. SPOOFING ATTACKS
+--------------------------------------------------------------------------------
+Spoofing means falsifying network headers or identity metadata to impersonate a trusted
+system, bypass security controls, or redirect network traffic.
+
+4.1 OSI Layer Breakdown:
+  * Layer 3 (Network): IP Spoofing.
+  * Layer 7 (Application): DNS Spoofing, Email Spoofing.
+
+4.2 Spoofing Vectors:
+
+  4.2.1 IP Spoofing
+    By altering the 'Source IP' field in the IPv4 header, an attacker can mask their true origin:
+      [ Version | IHL | DSCP | Total Length ]
+      [ Identification | Flags | Fragment Offset ]
+      [ TTL | Protocol (TCP/UDP) | Header Checksum ]
+      [ Spoofed Source IP Address (e.g., 10.0.0.1) ] -> Forged
+      [ Destination IP Address (Victim IP) ]
+    
+    If firewalls or systems trust traffic based solely on source IPs, an attacker can use
+    tools like `hping3` to inject packets with trusted internal IPs and bypass standard
+    access controls.
+
+  4.2.2 DNS Cache Poisoning
+    This attack targets the local recursive DNS server, injecting false records to redirect traffic.
+    * Here is how it happens:
+      1. The attacker queries the resolver for a target domain (like `bank.com`).
+      2. While the resolver reaches out to the authoritative name server, the attacker floods
+         it with spoofed responses pointing to a malicious IP.
+      3. To succeed, the attacker must guess the resolver's source port and the 16-bit DNS
+         Transaction ID before the legitimate response arrives.
+      4. If successful, the resolver caches the malicious record, sending all future users
+         to a phishing server until the Time-to-Live (TTL) expires.
+
+  4.2.3 Email Spoofing (SMTP)
+    SMTP was built without sender verification, making it easy to spoof headers. A connection
+    can claim any sender identity:
+      MAIL FROM:<ceo@company.com>
+      RCPT TO:<finance@company.com>
+      DATA
+      From: "CEO Name" <ceo@company.com>
+      Subject: Urgent Wire Transfer
+      ...
+
+4.3 Hardening & Defensive Controls:
+
+  * IP Spoofing Defense: Unicast Reverse Path Forwarding (uRPF)
+    uRPF helps prevent spoofing by checking if a packet's source IP is reachable via the
+    interface it arrived on. If the routing table indicates a different return path, the
+    router drops the packet.
+    * Configuring uRPF on a Cisco router interface:
+      Router(config)# interface gigabitethernet 0/0
+      Router(config-if)# ip verify unicast source reachable-via rx
+
+  * Email Spoofing Defense: SPF, DKIM, and DMARC:
+    1. SPF (Sender Policy Framework): A DNS TXT record listing the authorized mail servers
+       for a domain.
+       Example DNS TXT Record:
+         v=spf1 ip4:192.168.10.0/24 include:_spf.google.com -all
+    2. DKIM (DomainKeys Identified Mail): Cryptographically signs outbound email headers to
+       verify that the message hasn't been altered in transit.
+    3. DMARC: Tells receiving servers how to handle messages that fail SPF or DKIM checks
+       (e.g., monitor, quarantine, or reject).
+       Example DNS TXT Record:
+         v=DMARC1; p=reject; rua=mailto:dmarc-reports@company.com; pct=100
+
+4.4 Real-World Impact: GFW DNS Injection
+  The Great Firewall of China (GFW) relies heavily on DNS injection for censorship. When it
+  detects a DNS query for a blocked website crossing the border, it immediately injects a
+  spoofed DNS response. Because the GFW sits closer to the user than the authoritative servers,
+  its spoofed reply arrives first. The user's browser accepts this false address and ignores the
+  slower, legitimate reply, effectively blocking access.
+
+
+5. PROTOCOL DEFENSE SUMMARY MATRIX
+--------------------------------------------------------------------------------
+| Threat / Vector  | Vulnerable Protocol | OSI Layer | Detection Indicator        | Hardening Control            |
+|------------------|---------------------|-----------|----------------------------|------------------------------|
+| TCP SYN Flood    | TCP (3-Way Handshake)| Layer 4   | High SYN_RECV connections  | SYN Cookies / Rate Limits    |
+| DNS Amplification| UDP / DNS           | Layer 7/4 | Spikes in incoming UDP 53  | Response Rate Limiting (RRL) |
+| ARP Spoofing     | ARP                 | Layer 2   | Duplicate MACs in table    | Dynamic ARP Inspection (DAI) |
+| SSL Stripping    | HTTP / TLS          | Layer 7   | Decrypted plain web logs   | HSTS Header Implementation  |
+| DNS Poisoning    | DNS                 | Layer 7   | Mismatched IP resolutions  | DNSSEC Integration           |
+| Email Spoofing   | SMTP                | Layer 7   | Failed authentication logs | SPF, DKIM, and DMARC records |
+
+
+6. CONCLUSION & ZERO-TRUST FRAMEWORK
+--------------------------------------------------------------------------------
+The castle-and-moat perimeter model is no longer enough. As this analysis shows,
+foundational protocols like ARP, TCP, DNS, and SMTP are inherently trusting and easy
+to abuse once an attacker gets past the boundary.
+
+To secure modern environments, organizations need to implement a Zero-Trust model:
+1. Cryptographic Identity: Authenticate users, services, and devices cryptographically
+   rather than trusting them based on network location or IP addresses.
+2. End-to-End Encryption: Encrypt all internal and external network traffic, making
+   packet sniffing and MITM attempts useless.
+3. Micro-segmentation: Divide the network into small, isolated security zones to
+   contain any lateral movement or spoofing attacks.
+4. Continuous Monitoring: Use tools like Zeek or Suricata to monitor traffic, watching
+   for anomalies like unexpected ARP updates or unusual DNS queries.
+================================================================================
