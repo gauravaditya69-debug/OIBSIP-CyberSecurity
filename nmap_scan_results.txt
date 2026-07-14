@@ -1,0 +1,86 @@
+================================================================================
+       NMAP NETWORK SCAN RESULTS - Oasis Infobyte Cybersecurity Internship
+                              Task 1: Basic Network Scanning
+================================================================================
+  Target:       scanme.nmap.org (45.33.32.156)
+  Scanner:      Nmap 7.99
+  Date:         2026-07-12
+  Performed by: Aditya Gaurav (Intern)
+================================================================================
+
+
+Hi there! Here are the raw results from the Nmap scans I ran against the authorized test server. I started with a quick ping scan just to make sure the server was alive, and then followed up with a more aggressive service and version detection scan to see exactly what was running.
+
+================================================================================
+  SCAN 1: HOST DISCOVERY (Ping Scan)
+  Command run:  nmap -sn scanme.nmap.org
+================================================================================
+
+Starting Nmap 7.99 ( https://nmap.org ) at 2026-07-12 00:35 +0530
+Nmap scan report for scanme.nmap.org (45.33.32.156)
+Host is up (0.26s latency).
+Other addresses for scanme.nmap.org (not scanned): 2600:3c01::f03c:91ff:fe18:bb2f
+Nmap done: 1 IP address (1 host up) scanned in 1.13 seconds
+
+>>> My Observation: The server responded to the ping! It's up and running with a latency of 0.26s. I also noticed it has an IPv6 address available.
+
+
+================================================================================
+  SCAN 2: SERVICE VERSION & SCRIPT DETECTION
+  Command run:  nmap -sV -sC -T4 scanme.nmap.org
+================================================================================
+
+Starting Nmap 7.99 ( https://nmap.org ) at 2026-07-12 00:35 +0530
+Nmap scan report for scanme.nmap.org (45.33.32.156)
+Host is up (0.27s latency).
+Other addresses for scanme.nmap.org (not scanned): 2600:3c01::f03c:91ff:fe18:bb2f
+Not shown: 995 closed tcp ports (reset)
+PORT      STATE    SERVICE    VERSION
+22/tcp    open     ssh        OpenSSH 6.6.1p1 Ubuntu 2ubuntu2.13 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey: 
+|   1024 ac:00:a0:1a:82:ff:cc:55:99:dc:67:2b:34:97:6b:75 (DSA)
+|   2048 20:3d:2d:44:62:2a:b0:5a:9d:b5:b3:05:14:c2:a6:b2 (RSA)
+|   256 96:02:bb:5e:57:54:1c:4e:45:2f:56:4c:4a:24:b2:57 (ECDSA)
+|_  256 33:fa:91:0f:e0:e1:7b:1f:6d:05:a2:b0:f1:54:41:56 (ED25519)
+25/tcp    filtered smtp
+80/tcp    open     http       Apache httpd 2.4.7 ((Ubuntu))
+|_http-title: Go ahead and ScanMe!
+|_http-server-header: Apache/2.4.7 (Ubuntu)
+|_http-favicon: Nmap Project
+9929/tcp  open     nping-echo Nping echo
+31337/tcp open     tcpwrapped
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+Nmap done: 1 IP address (1 host up) scanned in 25.21 seconds
+
+
+================================================================================
+  MY SUMMARY OF THE FINDINGS
+================================================================================
+
+So, what did we actually find? 
+
+Out of the 1,000 most common ports that Nmap checks by default, 995 were closed. That leaves us with 5 ports of interest: 4 are open and 1 is filtered.
+
+  Target Details:
+  - IP Address:      45.33.32.156
+  - Hostname:        scanme.nmap.org
+  - Operating System: Linux (specifically Ubuntu based on the service versions)
+  
+  The Ports:
+  +-------+----------+------------+-----------------------------------------------------------+
+  | PORT  | STATE    | SERVICE    | WHAT I FOUND                                              |
+  +-------+----------+------------+-----------------------------------------------------------+
+  | 22    | open     | ssh        | Running OpenSSH 6.6.1p1. It's an older version on Ubuntu. |
+  | 25    | filtered | smtp       | Looks like a firewall is blocking packets to the mail port. |
+  | 80    | open     | http       | Running an older Apache web server (2.4.7).                 |
+  | 9929  | open     | nping-echo | A test echo service running for the Nmap project.         |
+  | 31337 | open     | tcpwrapped | The connection was accepted but then immediately closed.    |
+  +-------+----------+------------+-----------------------------------------------------------+
+
+Overall, the scan went smoothly and we successfully gathered the footprint of the test server!
+
+================================================================================
+  END OF REPORT
+================================================================================
